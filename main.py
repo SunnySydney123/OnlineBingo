@@ -1,25 +1,55 @@
-"""FastAPI application for the in-memory Digital Tambola game.
-
-The game store is process-local. Vercel may run requests in different
-isolates, so this storage is suitable for local play or a single warm
-instance, but it is not shared or durable across serverless instances.
-"""
+"""FastAPI application for the in-memory Digital Tambola game."""
 
 import asyncio
-import json
+import os
 import random
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException
+import uvicorn
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
-from sse_starlette.sse import EventSourceResponse
 
 
 app = FastAPI(title="Digital Tambola")
 STYLE_FILE = Path(__file__).with_name("style.css")
+
+
+class ConnectionManager:
+    """Track connected clients and broadcast game updates to each socket."""
+
+    def __init__(self) -> None:
+        self.active_connections: set[WebSocket] = set()
+        self.lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self.lock:
+            self.active_connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self.lock:
+            self.active_connections.discard(websocket)
+
+    async def broadcast(self, message: dict[str, Any]) -> None:
+        async with self.lock:
+            connections = tuple(self.active_connections)
+
+        disconnected: list[WebSocket] = []
+        for connection in connections:
+            try:
+                await connection.send_json(message)
+            except (OSError, RuntimeError, WebSocketDisconnect):
+                disconnected.append(connection)
+
+        if disconnected:
+            async with self.lock:
+                self.active_connections.difference_update(disconnected)
+
+
+manager = ConnectionManager()
 
 
 class CallNumberRequest(BaseModel):
@@ -36,7 +66,7 @@ class BannerRequest(BaseModel):
 
 
 class GameState:
-    """Mutable state and per-process SSE subscribers."""
+    """Mutable state shared by all requests handled by this app instance."""
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
@@ -45,7 +75,6 @@ class GameState:
         self.message_text = ""
         self.message_image_url = ""
         self.version = 0
-        self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 
     def _snapshot_unlocked(self) -> dict[str, Any]:
         return {
@@ -60,15 +89,10 @@ class GameState:
             "version": self.version,
         }
 
-    def _publish_unlocked(self) -> None:
-        update = {"version": self.version, "data": self._snapshot_unlocked()}
-        for subscriber in tuple(self.subscribers):
-            if subscriber.full():
-                try:
-                    subscriber.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            subscriber.put_nowait(update)
+    async def _publish_unlocked(self) -> None:
+        await manager.broadcast(
+            {"type": "game_state", "data": self._snapshot_unlocked()}
+        )
 
     async def snapshot(self) -> dict[str, Any]:
         async with self.lock:
@@ -86,14 +110,14 @@ class GameState:
 
             self.called_numbers.append(number)
             self.version += 1
-            self._publish_unlocked()
+            await self._publish_unlocked()
             return self._snapshot_unlocked()
 
     async def reset_round(self) -> dict[str, Any]:
         async with self.lock:
             self.called_numbers.clear()
             self.version += 1
-            self._publish_unlocked()
+            await self._publish_unlocked()
             return self._snapshot_unlocked()
 
     async def register_player(self, name: str) -> dict[str, Any]:
@@ -102,7 +126,7 @@ class GameState:
             player = {"id": player_id, "name": name, "ticket": _make_ticket()}
             self.players.append(player)
             self.version += 1
-            self._publish_unlocked()
+            await self._publish_unlocked()
             return {
                 "id": player_id,
                 "name": name,
@@ -114,21 +138,8 @@ class GameState:
             self.message_text = text.strip()
             self.message_image_url = image_url.strip()
             self.version += 1
-            self._publish_unlocked()
+            await self._publish_unlocked()
             return self._snapshot_unlocked()
-
-    async def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        subscriber: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
-        async with self.lock:
-            self.subscribers.add(subscriber)
-            subscriber.put_nowait(
-                {"version": self.version, "data": self._snapshot_unlocked()}
-            )
-        return subscriber
-
-    async def unsubscribe(self, subscriber: asyncio.Queue[dict[str, Any]]) -> None:
-        async with self.lock:
-            self.subscribers.discard(subscriber)
 
 
 def _make_ticket() -> list[list[int | None]]:
@@ -404,18 +415,51 @@ if (page === 'admin') {
   document.getElementById('player-form').addEventListener('submit', registerPlayer);
 }
 
-const eventSource = new EventSource('/stream');
-eventSource.addEventListener('game_state', (event) => {
-  try {
-    applyGameState(JSON.parse(event.data));
-  } catch (error) {
-    console.error('Could not process game update:', error);
+let gameSocket;
+let reconnectDelay = 1000;
+let reconnectTimer = null;
+
+function connectGameSocket() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  gameSocket = socket;
+
+  socket.addEventListener('open', () => {
+    reconnectDelay = 1000;
+  });
+
+  socket.addEventListener('message', (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === 'game_state') {
+        applyGameState(message.data);
+      } else if (message.type === 'ping') {
+        socket.send(JSON.stringify({ type: 'pong' }));
+      }
+    } catch (error) {
+      console.error('Could not process game update:', error);
+    }
+  });
+
+  socket.addEventListener('close', () => {
+    if (reconnectTimer !== null) return;
+    const delay = reconnectDelay + Math.random() * 500;
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connectGameSocket();
+    }, delay);
+  });
+
+  socket.addEventListener('error', () => socket.close());
+}
+
+connectGameSocket();
+window.setInterval(() => {
+  if (gameSocket && gameSocket.readyState === WebSocket.OPEN) {
+    gameSocket.send(JSON.stringify({ type: 'ping' }));
   }
-});
-eventSource.onerror = () => {
-  // EventSource retries automatically; each new stream begins with a full snapshot.
-  console.warn('Game stream interrupted; waiting for EventSource to reconnect.');
-};
+}, 20000);
 refreshGameState();
 """
 
@@ -601,27 +645,32 @@ async def update_game_banner(request: BannerRequest) -> dict[str, Any]:
     return await game.update_banner(request.message_text, image_url)
 
 
-@app.get("/stream")
-async def stream_game_state() -> EventSourceResponse:
-    subscriber = await game.subscribe()
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    try:
+        async with game.lock:
+            await manager.connect(websocket)
+            await websocket.send_json(
+                {"type": "game_state", "data": game._snapshot_unlocked()}
+            )
 
-    async def events():
-        try:
-            while True:
-                update = await subscriber.get()
-                yield {
-                    "id": str(update["version"]),
-                    "event": "game_state",
-                    "data": json.dumps(update["data"], separators=(",", ":")),
-                }
-        finally:
-            await game.unsubscribe(subscriber)
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "WebSocket messages must be JSON objects.",
+                    }
+                )
+            elif message.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await manager.disconnect(websocket)
 
-    return EventSourceResponse(
-        events(),
-        ping=5,
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
