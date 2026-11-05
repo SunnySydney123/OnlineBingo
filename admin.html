@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Tambola Admin</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body data-page="admin">
+    <div class="page-shell admin-shell">
+      <main class="admin-main-column">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Admin Console</p>
+            <h1>Digital Tambola</h1>
+          </div>
+        </header>
+
+        <div class="button-row">
+          <button id="draw-number-btn" class="primary-btn">Draw Next Number</button>
+          <button id="reset-game-btn" class="secondary-btn">Reset Round</button>
+        </div>
+
+        <div class="status-row">
+          <div class="status-card">
+            <span class="label">Last Number</span>
+            <strong id="last-number">-</strong>
+          </div>
+          <div class="status-card">
+            <span class="label">Drawn</span>
+            <strong id="drawn-count">0</strong>
+          </div>
+        </div>
+
+        <div class="admin-content-grid">
+          <div class="admin-results-column">
+            <div class="called-numbers-panel">
+              <h2>Numbers Called</h2>
+              <div id="called-numbers-list" class="called-number-list" aria-live="polite"></div>
+            </div>
+
+            <div class="board-card">
+              <div id="admin-grid" class="number-grid" aria-live="polite"></div>
+            </div>
+
+            <section class="players-panel">
+              <h2>Players</h2>
+              <div id="players-list" class="players-list"></div>
+            </section>
+          </div>
+
+          <aside class="banner-editor">
+            <h2>Lower Screen Banner</h2>
+            <div class="banner-form">
+              <label for="banner-text">Text message</label>
+              <input id="banner-text" type="text" maxlength="120" placeholder="Party vibes, birthday shoutout, or a fun note" />
+
+              <label for="banner-image-url">Image URL</label>
+              <input id="banner-image-url" type="url" placeholder="https://example.com/party-image.jpg" />
+
+              <div class="banner-actions">
+                <button id="update-banner-btn" class="primary-btn" type="button">Update Lower Screen</button>
+                <button id="clear-banner-btn" class="secondary-btn" type="button">Clear</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

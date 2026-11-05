@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Tambola Player</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body data-page="player">
+    <div class="page-shell player-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Party Game</p>
+          <h1>Digital Bingo</h1>
+        </div>
+      </header>
+
+      <div id="join-panel" class="join-panel">
+        <form id="player-form">
+          <label for="player-name">Enter your name</label>
+          <input id="player-name" name="player-name" type="text" maxlength="30" placeholder="e.g. Ravi" required />
+          <button type="submit" class="primary-btn">Generate Ticket</button>
+        </form>
+      </div>
+
+      <div id="ticket-panel" class="ticket-panel hidden">
+        <div class="ticket-header">
+          <h2 id="player-title">Ticket</h2>
+          <span id="current-call" class="current-call">Last call: -</span>
+        </div>
+        <div id="ticket-board" class="ticket-board" aria-live="polite"></div>
+      </div>
+
+      <div id="lower-banner-panel" class="lower-banner-panel hidden">
+        <div class="lower-banner-content">
+          <div id="lower-banner-text" class="lower-banner-text" aria-live="polite"></div>
+          <img id="lower-banner-image" class="lower-banner-image" alt="Party banner" />
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
