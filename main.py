@@ -1,20 +1,34 @@
 """FastAPI application for the in-memory Digital Tambola game."""
 
 import asyncio
+import hashlib
+import hmac
 import os
 import random
+import secrets
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="Digital Tambola")
 STYLE_FILE = Path(__file__).with_name("style.css")
+ADMIN_COOKIE_NAME = "admin_pincode_session"
+ADMIN_SESSION_MAX_AGE = 8 * 60 * 60
+ADMIN_SESSION_SECRET = secrets.token_bytes(32)
 
 
 class ConnectionManager:
@@ -63,6 +77,10 @@ class PlayerRequest(BaseModel):
 class BannerRequest(BaseModel):
     message_text: str = Field(default="", max_length=120)
     message_image_url: str = Field(default="", max_length=2048)
+
+
+class AdminLoginRequest(BaseModel):
+    pincode: str = Field(min_length=1, max_length=128)
 
 
 class GameState:
@@ -585,6 +603,87 @@ ADMIN_PAGE = r"""<!DOCTYPE html>
 """
 
 
+ADMIN_LOGIN_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Tambola Admin Login</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="banner-editor" aria-labelledby="admin-login-title">
+        <h1 id="admin-login-title">Admin Console</h1>
+        <form id="admin-login-form" class="banner-form">
+          <label for="admin-pincode">Enter admin PIN</label>
+          <input id="admin-pincode" name="pincode" type="password" inputmode="numeric" autocomplete="current-password" required />
+          <button class="primary-btn" type="submit">Continue</button>
+          <p id="admin-login-error" role="alert"></p>
+        </form>
+      </section>
+    </main>
+    <script>
+      document.getElementById('admin-login-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const input = document.getElementById('admin-pincode');
+        const error = document.getElementById('admin-login-error');
+        try {
+          const response = await fetch('/admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pincode: input.value }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Unable to sign in.');
+          window.location.replace('/admin');
+        } catch (loginError) {
+          error.textContent = loginError.message;
+          input.focus();
+        }
+      });
+    </script>
+  </body>
+</html>
+"""
+
+
+def _admin_pincode() -> str | None:
+    return os.environ.get("ADMIN_PINCODE")
+
+
+def _admin_session_signature(pincode: str, expires_at: int) -> str:
+    return hmac.new(
+        ADMIN_SESSION_SECRET,
+        f"{pincode}:{expires_at}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _is_admin_authenticated(request: Request, pincode: str) -> bool:
+    session = request.cookies.get(ADMIN_COOKIE_NAME, "")
+    try:
+        expiry_text, signature = session.split(".", maxsplit=1)
+        expires_at = int(expiry_text)
+    except ValueError:
+        return False
+
+    now = int(time.time())
+    if expires_at <= now or expires_at > now + ADMIN_SESSION_MAX_AGE:
+        return False
+
+    expected_signature = _admin_session_signature(pincode, expires_at)
+    return hmac.compare_digest(signature, expected_signature)
+
+
+def require_admin(request: Request) -> None:
+    pincode = _admin_pincode()
+    if not pincode:
+        raise HTTPException(status_code=503, detail="Admin PIN is not configured.")
+    if not _is_admin_authenticated(request, pincode):
+        raise HTTPException(status_code=401, detail="Enter the admin PIN to continue.")
+
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/player", response_class=HTMLResponse)
 async def player_page() -> HTMLResponse:
@@ -592,8 +691,42 @@ async def player_page() -> HTMLResponse:
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_page() -> HTMLResponse:
+async def admin_page(request: Request) -> HTMLResponse:
+    pincode = _admin_pincode()
+    if not pincode:
+        return HTMLResponse(
+            "<h1>Admin PIN is not configured</h1><p>Set the ADMIN_PINCODE environment variable.</p>",
+            status_code=503,
+        )
+    if not _is_admin_authenticated(request, pincode):
+        return HTMLResponse(ADMIN_LOGIN_PAGE)
     return HTMLResponse(ADMIN_PAGE.replace("__APP_SCRIPT__", APP_SCRIPT))
+
+
+@app.post("/admin/login")
+async def admin_login(request: Request, login: AdminLoginRequest) -> Response:
+    pincode = _admin_pincode()
+    if not pincode:
+        raise HTTPException(status_code=503, detail="Admin PIN is not configured.")
+    if not hmac.compare_digest(login.pincode, pincode):
+        raise HTTPException(status_code=401, detail="Incorrect PIN.")
+
+    expires_at = int(time.time()) + ADMIN_SESSION_MAX_AGE
+    response = JSONResponse({"authenticated": True})
+    forwarded_protocol = request.headers.get("x-forwarded-proto", "").split(",", 1)[0]
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        f"{expires_at}.{_admin_session_signature(pincode, expires_at)}",
+        max_age=ADMIN_SESSION_MAX_AGE,
+        path="/",
+        httponly=True,
+        secure=(
+            request.url.scheme == "https"
+            or forwarded_protocol.strip().lower() == "https"
+        ),
+        samesite="strict",
+    )
+    return response
 
 
 @app.get("/style.css")
@@ -614,12 +747,15 @@ async def get_players() -> dict[str, Any]:
 
 
 @app.post("/call-number")
-async def call_number(request: CallNumberRequest) -> dict[str, Any]:
+async def call_number(
+    request: CallNumberRequest,
+    _: None = Depends(require_admin),
+) -> dict[str, Any]:
     return await game.call_number(request.number)
 
 
 @app.post("/api/reset-game")
-async def reset_game() -> dict[str, Any]:
+async def reset_game(_: None = Depends(require_admin)) -> dict[str, Any]:
     return await game.reset_round()
 
 
@@ -633,7 +769,10 @@ async def register_player(request: PlayerRequest) -> dict[str, Any]:
 
 
 @app.post("/api/game-banner")
-async def update_game_banner(request: BannerRequest) -> dict[str, Any]:
+async def update_game_banner(
+    request: BannerRequest,
+    _: None = Depends(require_admin),
+) -> dict[str, Any]:
     image_url = request.message_image_url.strip()
     if image_url:
         parsed_url = urlsplit(image_url)
