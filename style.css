@@ -488,6 +488,9 @@ h1 {
   width: auto;
   max-width: 100%;
   height: auto;
+  max-height: none;
+  aspect-ratio: auto;
+  object-fit: contain;
   border-radius: 14px;
 }
 

@@ -488,7 +488,7 @@ PLAYER_PAGE = r"""<!DOCTYPE html>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Digital Tambola Player</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=2" />
   </head>
   <body data-page="player">
     <div class="page-shell player-shell">
@@ -534,7 +534,7 @@ ADMIN_PAGE = r"""<!DOCTYPE html>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Digital Tambola Admin</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=2" />
   </head>
   <body data-page="admin">
     <div class="page-shell admin-shell">
@@ -609,7 +609,7 @@ ADMIN_LOGIN_PAGE = r"""<!DOCTYPE html>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Digital Tambola Admin Login</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=2" />
   </head>
   <body>
     <main class="page-shell">
